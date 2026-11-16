@@ -7,6 +7,8 @@
   KAKAO_REST_API_KEY      (필수) 카카오 디벤로퍼스 REST API 키
   KAKAO_REFRESH_TOKEN     (필수) kakao_setup.py 로 발급한 refresh token
   KAKAO_CLIENT_SECRET     (선택) 앱에서 Client Secret을 켰다면 입력
+  NTFY_TOPIC              (선택) ntfy 토픽 이름 → 폰 푸시
+  TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID  (선택) 텔레그램 봇 알림
   DRY_RUN=1               카톡을 보내지 않고 결과만 출력 (테스트용)
   FORCE_NOTIFY=1          상태와 상관없이 테스트 메시지 1통 발송 (카톡 연동 점검용)
 """
@@ -14,8 +16,10 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 from playwright.sync_api import sync_playwright
 
@@ -172,6 +176,98 @@ def kakao_send(text):
         print("kakao send:", r.status, r.read().decode())
 
 
+def kakao_calendar_send(text):
+    """톡캘린더에 '곧 시작하는 일정'을 만들어 카카오톡 알림(푸시)을 유도한다.
+    - 시작/종료 시각은 5분 단위여야 한다 (카카오 제약)
+    - 일정 시작 5~10분 전 알림 + 시작 시점 알림을 건다 (0 이 거부되면 [5] 로 재시도)
+    - 토큰에 talk_calendar 동의가 포함되어 있어야 한다
+    """
+    token = kakao_access_token()
+    now = datetime.now(timezone.utc)
+    start = (now + timedelta(minutes=5)).replace(second=0, microsecond=0)
+    start += timedelta(minutes=(-start.minute) % 5)
+    end = start + timedelta(minutes=5)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    last_err = None
+    for reminders in ([0, 5], [5]):
+        event = {
+            "title": "🎷 블루노트 12/5 자리 났어요!",
+            "time": {"start_at": start.strftime(fmt), "end_at": end.strftime(fmt),
+                     "time_zone": "Asia/Seoul", "all_day": False, "lunar": False},
+            "description": text + "\n" + LIST_URL,
+            "reminders": reminders,
+            "color": "RED",
+        }
+        req = urllib.request.Request(
+            "https://kapi.kakao.com/v2/api/calendar/create/event",
+            data=urllib.parse.urlencode({"event": json.dumps(event, ensure_ascii=False)}).encode(),
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                print("kakao calendar send:", r.status, r.read().decode(), "reminders=", reminders)
+                return
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            print(f"kakao calendar HTTP {e.code} (reminders={reminders}): {body}", file=sys.stderr)
+            last_err = e
+    raise last_err
+
+
+def ntfy_send(text):
+    topic = os.environ["NTFY_TOPIC"]
+    payload = {
+        "topic": topic,
+        "title": "블루노트 12/5 자리 알림",
+        "message": text,
+        "priority": 5,
+        "tags": ["saxophone"],
+        "click": LIST_URL,
+    }
+    req = urllib.request.Request(
+        "https://ntfy.sh/",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        print("ntfy send:", r.status)
+
+
+def telegram_send(text):
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    body = urllib.parse.urlencode({
+        "chat_id": os.environ["TELEGRAM_CHAT_ID"],
+        "text": text + "\n" + LIST_URL,
+    }).encode()
+    req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=body)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        print("telegram send:", r.status)
+
+
+def notify_all(text):
+    """설정된 모든 채널로 전송. 하나라도 성공하면 OK, 전부 실패하면 예외."""
+    channels = []
+    if os.environ.get("KAKAO_REST_API_KEY") and os.environ.get("KAKAO_REFRESH_TOKEN"):
+        channels.append(("kakao", kakao_send))
+        channels.append(("kakao-calendar", kakao_calendar_send))
+    if os.environ.get("NTFY_TOPIC"):
+        channels.append(("ntfy", ntfy_send))
+    if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+        channels.append(("telegram", telegram_send))
+    if not channels:
+        raise RuntimeError("no notification channel configured")
+    ok = 0
+    for name, fn in channels:
+        try:
+            fn(text)
+            ok += 1
+        except Exception as e:
+            print(f"notify {name} FAILED:", repr(e), file=sys.stderr)
+    if ok == 0:
+        raise RuntimeError("all notification channels failed")
+
+
 LABEL = {"full": "×(만석)", "few": "△(잔여 적음)", "open": "○(좌석 있음)", "unknown": "?(판별 불가)"}
 
 
@@ -198,7 +294,7 @@ def main():
     if dry:
         print("(DRY_RUN) 전송 생략")
     else:
-        kakao_send(msg)
+        notify_all(msg)
     return 0
 
 
