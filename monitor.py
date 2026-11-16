@@ -87,7 +87,7 @@ def fetch_status():
         )
         page = ctx.new_page()
         page.goto(LIST_URL, wait_until="domcontentloaded", timeout=45000)
-        link = page.locator(f'a[href$="{EVENT_HREF}"]').first
+        link = page.locator(f'a[href$="{EVENT_HREF}"]:visible').first
         link.wait_for(state="visible", timeout=30000)
         link.click()
         page.wait_for_selector('[role="dialog"] >> text=/1st/', timeout=30000)
