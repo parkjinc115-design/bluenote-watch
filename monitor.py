@@ -86,15 +86,28 @@ def fetch_status():
                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
         )
         page = ctx.new_page()
-        page.goto(LIST_URL, wait_until="domcontentloaded", timeout=45000)
-        link = page.locator(f'a[href$="{EVENT_HREF}"]:visible').first
-        link.wait_for(state="visible", timeout=30000)
-        link.click()
-        page.wait_for_selector('[role="dialog"] >> text=/1st/', timeout=30000)
-        page.wait_for_timeout(800)  # 아이콘 렌더링 여유
-        data = page.evaluate(EXTRACT_JS, TARGET_DATE_PATTERNS)
-        browser.close()
-    return data
+        try:
+            page.goto(LIST_URL, wait_until="domcontentloaded", timeout=45000)
+            link = page.locator(f'a[href$="{EVENT_HREF}"]:visible').first
+            link.wait_for(state="visible", timeout=30000)
+            link.click()
+            # 팝업 안의 공연 회차(1st) 가 화면에 나타날 때까지 대기 (role 에 의존하지 않음)
+            page.get_by_text("1st", exact=True).first.wait_for(state="visible", timeout=30000)
+            page.wait_for_timeout(1000)  # 아이콘 렌더링 여유
+            data = page.evaluate(EXTRACT_JS, TARGET_DATE_PATTERNS)
+            return data
+        except Exception:
+            # 원인 파악용: 현재 페이지 상태를 로그에 남긴다
+            print("---- DEBUG url:", page.url)
+            try:
+                print("---- DEBUG title:", page.title())
+                print("---- DEBUG body text (앞 2500자):")
+                print(page.inner_text("body")[:2500])
+            except Exception as e2:
+                print("---- DEBUG body read failed:", repr(e2))
+            raise
+        finally:
+            browser.close()
 
 
 def classify(data):
